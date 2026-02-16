@@ -185,7 +185,6 @@ typedef enum {
     ACTION_SEARCH_SEND,
     ACTION_SEARCH_END,
     ACTION_BROWSE_ADD,
-    ACTION_BROWSE_SYNC,
     ACTION_BROWSE_END,
     ACTION_TX_HANDLE,
     ACTION_RX_HANDLE,
@@ -392,18 +391,7 @@ typedef struct mdns_browse_s {
 
     char *service;
     char *proto;
-    mdns_result_t *result;
 } mdns_browse_t;
-
-typedef struct mdns_browse_result_sync_t {
-    mdns_result_t *result;
-    struct mdns_browse_result_sync_t *next;
-} mdns_browse_result_sync_t;
-
-typedef struct mdns_browse_sync {
-    mdns_browse_t *browse;
-    mdns_browse_result_sync_t *sync_result;
-} mdns_browse_sync_t;
 
 typedef struct mdns_server_s {
     struct {
@@ -447,9 +435,6 @@ typedef struct {
         struct {
             mdns_browse_t *browse;
         } browse_add;
-        struct {
-            mdns_browse_sync_t *browse_sync;
-        } browse_sync;
     } data;
 } mdns_action_t;
 

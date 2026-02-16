@@ -118,7 +118,7 @@ typedef struct mdns_result_s {
 } mdns_result_t;
 
 typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
-typedef void (*mdns_browse_notify_t)(mdns_result_t *result);
+typedef void (*mdns_browse_notify_t)(const char *instance_name, uint32_t ttl);
 
 /**
  * @brief  Initialize mDNS on given interface
@@ -929,6 +929,21 @@ mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_brow
  *     - ESP_ERR_NO_MEM         memory error.
  */
 esp_err_t mdns_browse_delete(const char *service, const char *proto);
+
+/**
+ * @brief   Get the current depth of the mDNS action queue.
+ *
+ * @return  Number of pending actions in the queue (0 if mDNS not running).
+ */
+size_t mdns_action_queue_depth(void);
+
+/**
+ * @brief  Get mDNS RX packet statistics.
+ *
+ * @param  filtered  Output: packets dropped by the pre-filter (not relevant to our services)
+ * @param  dropped   Output: packets dropped because the action queue was full
+ */
+void mdns_rx_stats(uint32_t *filtered, uint32_t *dropped);
 
 #ifdef __cplusplus
 }

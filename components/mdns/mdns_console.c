@@ -1341,10 +1341,10 @@ static struct {
     struct arg_end *end;
 } mdns_browse_args;
 
-static void mdns_browse_notifier(mdns_result_t *result)
+static void mdns_browse_notifier(const char *instance_name, uint32_t ttl)
 {
-    if (result) {
-        mdns_print_results(result);
+    if (instance_name) {
+        printf("mDNS browse: %s (ttl=%" PRIu32 ")\n", instance_name, ttl);
     }
 }
 

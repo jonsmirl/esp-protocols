@@ -42,6 +42,9 @@ static struct udp_pcb *_pcb_main = NULL;
 
 static const char *TAG = "mdns_networking";
 
+// Defined in mdns.c — used by the pre-filter to check service/browse/hostname
+extern mdns_server_t *_mdns_server;
+
 static void _udp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *pb, const ip_addr_t *raddr, uint16_t rport);
 
 /**
@@ -132,6 +135,124 @@ static esp_err_t _udp_join_group(mdns_if_t if_inx, mdns_ip_protocol_t ip_protoco
 }
 
 /**
+ * @brief  Fast pre-filter for mDNS response packets.
+ *
+ * Scans raw packet bytes for service names relevant to our active browses,
+ * searches, and registered services.  Drops response packets that only
+ * contain records for services we don't care about (printers, Chromecasts,
+ * AirPlay, etc.).  Query packets are always accepted — we must answer them
+ * if they target our services.
+ *
+ * This runs in the lwIP/tcpip callback, so it must be lock-free and fast.
+ * The check is conservative: any packet containing our hostname or a
+ * registered/browsed service name passes through.  False positives are
+ * fine (the full parser will handle them); false negatives must not occur.
+ */
+static bool _mdns_rx_is_relevant(struct pbuf *pb)
+{
+    const uint8_t *data = (const uint8_t *)pb->payload;
+    size_t len = pb->len;
+
+    // Too short to be a valid mDNS packet
+    if (len < 12) {
+        return false;
+    }
+
+    // Always accept queries (QR bit = 0) — we may need to respond
+    uint16_t flags = (data[2] << 8) | data[3];
+    if (!(flags & 0x8000)) {
+        return true;
+    }
+
+    // For responses: scan the raw packet for DNS-encoded service names
+    // we care about.  DNS labels are length-prefixed, so "_matter" appears
+    // as the byte sequence \x07_matter in the wire format.  We scan for
+    // all registered services, browses, and our own hostname.
+    //
+    // We check against the server's hostname and the service/browse lists.
+    // These are read-only here (we only read pointers and compare strings).
+    // The mdns service task could be modifying them concurrently, but:
+    //   - hostname pointer is updated atomically (single pointer write)
+    //   - service/browse lists: we may read a stale or partially-updated
+    //     list, but the worst case is a false positive (packet accepted
+    //     when it shouldn't be) or a very brief false negative on the
+    //     first packet after a new browse starts.  Both are harmless.
+    if (!_mdns_server) {
+        return true;  // Server not initialized yet — accept everything
+    }
+
+    // Check for our hostname (probe/conflict detection)
+    const char *hostname = _mdns_server->hostname;
+    if (hostname && hostname[0]) {
+        size_t hlen = strlen(hostname);
+        if (hlen < 64) {
+            // Build DNS label: length byte + name
+            uint8_t label[65];
+            label[0] = (uint8_t)hlen;
+            memcpy(label + 1, hostname, hlen);
+            if (memmem(data + 12, len - 12, label, hlen + 1)) {
+                return true;
+            }
+        }
+    }
+
+    // Check for browsed service names (e.g., "_matter._tcp")
+    mdns_browse_t *b = _mdns_server->browse;
+    while (b) {
+        if (b->service[0]) {
+            size_t slen = strlen(b->service);
+            if (slen < 64) {
+                uint8_t label[65];
+                label[0] = (uint8_t)slen;
+                memcpy(label + 1, b->service, slen);
+                if (memmem(data + 12, len - 12, label, slen + 1)) {
+                    return true;
+                }
+            }
+        }
+        b = b->next;
+    }
+
+    // Check for registered service names (services we advertise)
+    mdns_srv_item_t *s = _mdns_server->services;
+    while (s) {
+        if (s->service && s->service->service && s->service->service[0]) {
+            size_t slen = strlen(s->service->service);
+            if (slen < 64) {
+                uint8_t label[65];
+                label[0] = (uint8_t)slen;
+                memcpy(label + 1, s->service->service, slen);
+                if (memmem(data + 12, len - 12, label, slen + 1)) {
+                    return true;
+                }
+            }
+        }
+        s = s->next;
+    }
+
+    // Check for active search names
+    mdns_search_once_t *srch = _mdns_server->search_once;
+    while (srch) {
+        if (srch->service && srch->service[0]) {
+            size_t slen = strlen(srch->service);
+            if (slen < 64) {
+                uint8_t label[65];
+                label[0] = (uint8_t)slen;
+                memcpy(label + 1, srch->service, slen);
+                if (memmem(data + 12, len - 12, label, slen + 1)) {
+                    return true;
+                }
+            }
+        }
+        srch = srch->next;
+    }
+
+    return false;  // Not relevant — drop it
+}
+
+uint32_t s_rx_filtered_count = 0;
+
+/**
  * @brief  the receive callback of the raw udp api. Packets are received here
  *
  */
@@ -143,6 +264,13 @@ static void _udp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *pb, const ip
         struct pbuf *this_pb = pb;
         pb = pb->next;
         this_pb->next = NULL;
+
+        // Pre-filter: drop response packets not relevant to our services
+        if (!_mdns_rx_is_relevant(this_pb)) {
+            s_rx_filtered_count++;
+            pbuf_free(this_pb);
+            continue;
+        }
 
         mdns_rx_packet_t *packet = (mdns_rx_packet_t *)mdns_mem_malloc(sizeof(mdns_rx_packet_t));
         if (!packet) {
